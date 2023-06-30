@@ -22,7 +22,7 @@ class Quote:
 
 
 class Order:
-    def __init__(self, order_id, timestamp, instrument, side, price, volume, status):
+    def __init__(self, order_id, timestamp, instrument, side, price, volume, status, last_changed):
         self.order_id = order_id
         self.timestamp = timestamp
         self.instrument = instrument
@@ -30,6 +30,20 @@ class Order:
         self.price = price
         self.volume = volume
         self.status = status
+        self.last_changed = last_changed
+
+
+def serialize_order(order):
+    return {
+        'order_id': order.order_id,
+        'timestamp': order.timestamp,
+        'instrument': order.instrument,
+        'side': order.side,
+        'price': order.price,
+        'volume': order.volume,
+        'status': order.status,
+        "last_changed": order.last_changed
+    }
 
 
 async def subscribe_market_data(websocket, data):
@@ -80,6 +94,12 @@ async def cancel_order(websocket, data):
         await websocket.send(format_error_info('Order not found'))
 
 
+async def get_order_id_info(websocket, data):
+    instrument = data['instrument']
+    orders_info = get_orders_info_by_instrument(instrument)
+    await websocket.send(format_order_info(orders_info))
+
+
 def format_success_info(message):
     return json.dumps({
         'messageType': 'SuccessInfo',
@@ -102,9 +122,10 @@ def format_market_data_update(data):
 
 
 def format_order_info(data):
+    serialized_orders = [serialize_order(order) for order in data]
     return json.dumps({
         'messageType': 'OrderInfo',
-        'message': data
+        'message': serialized_orders
     })
 
 
@@ -138,9 +159,9 @@ def create_order(order_id, timestamp, instrument, side, price, volume, status):
                        price REAL, volume REAL, status TEXT)''')
 
     cursor.execute(
-        f"INSERT INTO orders (order_id, timestamp, instrument, side, price, volume, status) "
-        f"VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (order_id, timestamp, instrument, side, price, volume, status)
+        f"INSERT INTO orders (order_id, timestamp, instrument, side, price, volume, status, last_changed) "
+        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (order_id, timestamp, instrument, side, price, volume, status, timestamp)
     )
 
     conn.commit()
@@ -157,7 +178,10 @@ def cancel_existing_order(order_id):
     if row:
         status = row[6]
         if status == 'Active':
-            cursor.execute(f"UPDATE orders SET status = 'Cancelled' WHERE order_id = '{order_id}'")
+            timestamp = str(datetime.datetime.now())
+            cursor.execute(
+                f"UPDATE orders SET status = 'Cancelled', last_changed = '{timestamp}' WHERE order_id = '{order_id}'")
+
             conn.commit()
             conn.close()
             return True
@@ -175,10 +199,27 @@ def get_orders_info():
 
     orders_info = []
     for row in rows:
-        order_id, timestamp, instrument, side, price, volume, status = row
-        order = Order(order_id, timestamp, instrument, side, price, volume, status)
+        order_id, timestamp, instrument, side, price, volume, status, last_changed = row
+        order = Order(order_id, timestamp, instrument, side, price, volume, status, last_changed)
         orders_info.append(order)
+        print(last_changed)
+    conn.close()
+    return orders_info
 
+
+def get_orders_info_by_instrument(instrument):
+    conn = sqlite3.connect('orders.db')
+    cursor = conn.cursor()
+
+    cursor.execute(f"SELECT * FROM orders WHERE instrument = '{instrument}'")
+    rows = cursor.fetchall()
+
+    orders_info = []
+    for row in rows:
+        order_id, timestamp, _, side, price, volume, status, last_changed = row
+        order = Order(order_id, timestamp, instrument, side, price, volume, status, last_changed)
+        orders_info.append(order)
+    print(orders_info)
     conn.close()
     return orders_info
 
@@ -197,6 +238,8 @@ async def handle_message(websocket, message):
         await place_order(websocket, message['message'])
     elif message_type == 'CancelOrder':
         await cancel_order(websocket, message['message'])
+    elif message_type == 'GetOrderByIdInfo':
+        await get_order_id_info(websocket, message['message'])
     else:
         await websocket.send(format_error_info('Invalid message type'))
 
@@ -216,10 +259,15 @@ async def consumer(websocket, path):
 async def market_data_publisher():
     while True:
         for subscription_id, subscription in subscriptions.items():
+
             instrument = subscription['instrument']
             quote = get_quote(instrument)
             message = format_market_data_update(quote)
-            await subscription['websocket'].send(message)
+
+            try:
+                await subscription['websocket'].send(message)
+            except:
+                continue
         await asyncio.sleep(1)
 
 
@@ -242,9 +290,9 @@ async def update_quotes():
             timestamp = str(datetime.datetime.now())
             cursor.execute(
                 f"INSERT INTO quotes (instrument, timestamp, bid, offer, min_amount, max_amount) "
-                   f"VALUES (?, ?, ?, ?, ?, ?)",
-                   (instrument, timestamp, new_bid, new_offer, 0, 0)
-             )
+                f"VALUES (?, ?, ?, ?, ?, ?)",
+                (instrument, timestamp, new_bid, new_offer, 0, 0)
+            )
             conn.commit()
             conn.close()
 
@@ -255,19 +303,24 @@ async def update_quotes():
 
 def process_orders(instrument, current_price):
     conn = sqlite3.connect('orders.db')
-    cursor = conn.cursor()
 
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS orders
+                      (order_id TEXT, timestamp TEXT, instrument TEXT, side TEXT,
+                       price REAL, volume REAL, status TEXT, last_changed TEXT)''')
     cursor.execute(f"SELECT * FROM orders WHERE instrument = '{instrument}' AND status = 'Active'")
     rows = cursor.fetchall()
 
     for row in rows:
-        order_id, timestamp, _, side, price, volume, _ = row
+        order_id, timestamp, _, side, price, volume, _,last_changed = row
         price = float(price)
 
         if side == 'Buy' and price >= current_price:
-            cursor.execute(f"UPDATE orders SET status = 'Filled' WHERE order_id = '{order_id}'")
+            cursor.execute(
+                f"UPDATE orders SET status = 'Filled', last_changed = '{timestamp}' WHERE order_id = '{order_id}'")
         elif side == 'Sell' and price <= current_price:
-            cursor.execute(f"UPDATE orders SET status = 'Filled' WHERE order_id = '{order_id}'")
+            cursor.execute(
+                f"UPDATE orders SET status = 'Filled', last_changed = '{timestamp}' WHERE order_id = '{order_id}'")
 
     conn.commit()
     conn.close()
