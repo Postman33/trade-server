@@ -14,11 +14,12 @@ orders = {}
 
 
 class Quote:
-    def __init__(self, bid, offer, min_amount, max_amount):
+    def __init__(self, bid, offer, min_amount, max_amount, timestamp=None):
         self.bid = bid
         self.offer = offer
         self.min_amount = min_amount
         self.max_amount = max_amount
+        self.timestamp = timestamp
 
 
 class Order:
@@ -121,6 +122,14 @@ def format_market_data_update(data):
     })
 
 
+def format_quotes_info(data):
+    serialized_quotes = [quote.__dict__ for quote in data]
+    return json.dumps({
+        'messageType': 'QuotesInfo',
+        'message': serialized_quotes
+    })
+
+
 def format_order_info(data):
     serialized_orders = [serialize_order(order) for order in data]
     return json.dumps({
@@ -134,29 +143,56 @@ def format_current_quotes(data):
         'messageType': 'CurrentQuotes',
         'message': data.__dict__
     })
+def init():
+    conn = sqlite3.connect('orders.db')
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS orders
+                       (order_id TEXT, timestamp TEXT, instrument TEXT, side TEXT,
+                        price REAL, volume REAL, status TEXT)''')
+    conn.commit()
+    conn.close()
 
+    conn = sqlite3.connect('quotes.db')
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS quotes
+                            (timestamp TEXT, instrument TEXT, bid REAL, offer REAL, min_amount REAL, max_amount REAL)''')
+    conn.commit()
+    conn.close()
 
 def get_quote(instrument):
     conn = sqlite3.connect('quotes.db')
     cursor = conn.cursor()
-
     cursor.execute(f"SELECT * FROM quotes WHERE instrument = '{instrument}' ORDER BY timestamp DESC LIMIT 1")
     row = cursor.fetchone()
 
     if row:
         _, timestamp, bid, offer, min_amount, max_amount = row
-        return Quote(bid=str(bid), offer=offer, min_amount=min_amount, max_amount=max_amount)
+        return Quote(bid=str(bid), offer=offer, min_amount=min_amount, max_amount=max_amount, timestamp=timestamp)
 
     conn.close()
+
+
+def get_quotes(instrument):
+    conn = sqlite3.connect('quotes.db')
+    cursor = conn.cursor()
+
+    cursor.execute(f"SELECT * FROM quotes WHERE instrument = '{instrument}' ORDER BY timestamp DESC LIMIT 25")
+    rows = cursor.fetchall()
+
+    quotes = []
+    for row in rows:
+        tm, instrument, bid, offer, min_amount, max_amount = row
+        quote = Quote(bid=str(bid), offer=offer, min_amount=min_amount, max_amount=max_amount, timestamp=tm)
+        quotes.append(quote)
+
+    conn.close()
+    return quotes
 
 
 def create_order(order_id, timestamp, instrument, side, price, volume, status):
     conn = sqlite3.connect('orders.db')
     cursor = conn.cursor()
 
-    cursor.execute('''CREATE TABLE IF NOT EXISTS orders
-                      (order_id TEXT, timestamp TEXT, instrument TEXT, side TEXT,
-                       price REAL, volume REAL, status TEXT)''')
 
     cursor.execute(
         f"INSERT INTO orders (order_id, timestamp, instrument, side, price, volume, status, last_changed) "
@@ -202,7 +238,6 @@ def get_orders_info():
         order_id, timestamp, instrument, side, price, volume, status, last_changed = row
         order = Order(order_id, timestamp, instrument, side, price, volume, status, last_changed)
         orders_info.append(order)
-        print(last_changed)
     conn.close()
     return orders_info
 
@@ -262,10 +297,13 @@ async def market_data_publisher():
 
             instrument = subscription['instrument']
             quote = get_quote(instrument)
+            quotes = get_quotes(instrument)
+
             message = format_market_data_update(quote)
 
             try:
                 await subscription['websocket'].send(message)
+                await subscription['websocket'].send(format_quotes_info(quotes))
             except:
                 continue
         await asyncio.sleep(1)
@@ -277,13 +315,18 @@ async def update_quotes():
             current_quote = get_quote(instrument)
             if current_quote is None:
                 current_price = 60
+                new_offer = 150
             else:
-                current_price = float(current_quote.offer)
+                current_price = float(current_quote.bid)
+                new_offer = float(current_quote.offer)
 
             current_price += random.uniform(-0.5, 0.5)
             current_price = max(0, min(100, current_price))  # Ограничиваем цену между 0 и 100
+
             new_bid = str(current_price)
-            new_offer = current_price
+
+            new_offer += random.uniform(-5, 5)
+            new_offer = max(0, min(250, new_offer))
 
             conn = sqlite3.connect('quotes.db')
             cursor = conn.cursor()
@@ -312,15 +355,17 @@ def process_orders(instrument, current_price):
     rows = cursor.fetchall()
 
     for row in rows:
-        order_id, timestamp, _, side, price, volume, _,last_changed = row
+        order_id, timestamp, _, side, price, volume, _, last_changed = row
         price = float(price)
+
+        timestamp_upd = str(datetime.datetime.now())
 
         if side == 'Buy' and price >= current_price:
             cursor.execute(
-                f"UPDATE orders SET status = 'Filled', last_changed = '{timestamp}' WHERE order_id = '{order_id}'")
+                f"UPDATE orders SET status = 'Filled', last_changed = '{timestamp_upd}' WHERE order_id = '{order_id}'")
         elif side == 'Sell' and price <= current_price:
             cursor.execute(
-                f"UPDATE orders SET status = 'Filled', last_changed = '{timestamp}' WHERE order_id = '{order_id}'")
+                f"UPDATE orders SET status = 'Filled', last_changed = '{timestamp_upd}' WHERE order_id = '{order_id}'")
 
     conn.commit()
     conn.close()
