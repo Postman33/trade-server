@@ -100,8 +100,6 @@ async def handle_message(websocket, message):
         else:
             await handler['handler'](websocket, message.get('message'))
     else:
-        print('else')
-        print(message)
         await websocket.send(format_error_info('Invalid message type'))
 
 
@@ -110,7 +108,6 @@ async def consumer(websocket, path):
         async for message in websocket:
             try:
                 data = json.loads(message)
-                print(data)
                 await handle_message(websocket, data)
             except json.JSONDecodeError:
                 await websocket.send(format_error_info('Invalid JSON format'))
