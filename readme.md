@@ -6,7 +6,7 @@
 
 1. Клонируйте репозиторий:
 
-git clone 
+git clone https://github.com/Postman33/trade-server.git
 
 
 2. Перейдите в каталог проекта:
@@ -20,7 +20,7 @@ pip install -r requirements.txt
 
 ## Запуск
 
-python main.py
+python start_server.py
 
 
 ## Использование
